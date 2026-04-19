@@ -15,6 +15,7 @@ from schemas.state_schema import AppPhase
 from nodes import decomposition, search, clean_chunk, embed, aggregate, cluster, extract_facts, gatekeeper, generate_report, stateless_rag
 from evals import relevance_scorer
 from utils import llm_clients
+from utils import observability as obs
 
 st.set_page_config(page_title="Research Assistant", layout="wide")
 
@@ -30,6 +31,7 @@ groq_client, embedding_model = load_clients()
 ui.render_icon_title("manage_search", "Research Assistant", level=1)
 
 phase = st.session_state.app_state.phase
+obs.set_run_context(st.session_state.get("run_id"), phase=phase.value)
 
 if "user_resource_urls" not in st.session_state:
     st.session_state.user_resource_urls = set()
@@ -37,6 +39,10 @@ if "user_resource_urls" not in st.session_state:
 if "visited_phase_values" not in st.session_state:
     st.session_state.visited_phase_values = {phase.value}
 st.session_state.visited_phase_values.add(phase.value)
+
+if "run_id" not in st.session_state:
+    st.session_state.run_id = None
+obs.set_original_query(st.session_state.get("query_data", {}).get("original", ""))
 
 
 def _normalize_urls(raw_urls: str):
@@ -77,17 +83,37 @@ def _ingest_new_documents(new_documents):
     if not new_documents:
         return
 
-    new_chunks = clean_chunk.clean_and_chunk(new_documents)
+    obs.set_run_context(st.session_state.get("run_id"), phase=AppPhase.SOURCE_CURATION.value)
+    with obs.node_span(
+        "manual_ingest.clean_chunk",
+        {"new_documents": len(new_documents)},
+    ):
+        new_chunks = clean_chunk.clean_and_chunk(new_documents)
+    obs.log_node_output("manual_ingest.clean_chunk", {"new_chunks": len(new_chunks)})
+
     if not new_chunks:
         return
 
-    new_chunks = embed.embed_chunks(new_chunks, embedding_model)
+    with obs.node_span("manual_ingest.embed", {"chunks": len(new_chunks)}):
+        new_chunks = embed.embed_chunks(new_chunks, embedding_model)
+    obs.log_node_output("manual_ingest.embed", {"embedded_chunks": len(new_chunks)})
+
     all_documents = st.session_state.documents + new_documents
     all_chunks = st.session_state.chunks + new_chunks
-    all_documents = aggregate.aggregate(all_chunks, all_documents)
+    with obs.node_span(
+        "manual_ingest.aggregate",
+        {"chunks": len(all_chunks), "documents": len(all_documents)},
+    ):
+        all_documents = aggregate.aggregate(all_chunks, all_documents)
+    obs.log_node_output("manual_ingest.aggregate", {"documents": len(all_documents)})
 
     main_query_embedding = embedding_model.encode(st.session_state.query_data["original"])
-    all_documents = relevance_scorer.calculate_relevance(all_documents, main_query_embedding)
+    with obs.node_span(
+        "manual_ingest.relevance",
+        {"documents": len(all_documents)},
+    ):
+        all_documents = relevance_scorer.calculate_relevance(all_documents, main_query_embedding)
+    obs.log_node_output("manual_ingest.relevance", {"documents": len(all_documents)})
 
     st.session_state.documents = all_documents
     st.session_state.chunks = all_chunks
@@ -115,6 +141,8 @@ def _reset_from_phase(target_phase: AppPhase):
         st.session_state.user_resource_urls = set()
         st.session_state.pop("selected_cluster_k", None)
         st.session_state.pop("last_active_chunk_count", None)
+        st.session_state.run_id = None
+        obs.set_original_query("")
     elif target_phase == AppPhase.QUERY_TUNING:
         st.session_state.documents = []
         st.session_state.chunks = []
@@ -126,6 +154,8 @@ def _reset_from_phase(target_phase: AppPhase):
         st.session_state.user_resource_urls = set()
         st.session_state.pop("selected_cluster_k", None)
         st.session_state.pop("last_active_chunk_count", None)
+        st.session_state.run_id = None
+        obs.set_original_query("")
     elif target_phase == AppPhase.SOURCE_CURATION:
         st.session_state.approved_doc_ids = []
         st.session_state.approved_chunks = []
@@ -164,29 +194,56 @@ if phase == AppPhase.INPUT:
     query = st.text_input("Enter your research question:", placeholder="e.g., What are the latest developments in fusion energy?")
     if st.button("Start Research"):
         if query:
+            run_id = obs.new_run_id()
+            st.session_state.run_id = run_id
+            obs.set_run_context(run_id, phase=AppPhase.INPUT.value)
+            obs.set_original_query(query)
+            obs.log_event("run_started", {"query": query})
             st.session_state.query_data["original"] = query
             with st.spinner("Decomposing query..."):
-                sub_queries = decomposition.decompose_query(query, groq_client)
+                with obs.node_span("decomposition", {"query": query}):
+                    sub_queries = decomposition.decompose_query(query, groq_client)
                 st.session_state.query_data["sub_queries"] = sub_queries
+                obs.log_node_output("decomposition", {"sub_queries": sub_queries, "sub_query_count": len(sub_queries)})
             sm.set_phase(AppPhase.QUERY_TUNING)
             st.rerun()
 
 elif phase == AppPhase.QUERY_TUNING:
     updated_queries = ui.render_query_tuning(st.session_state.query_data["sub_queries"])
     if st.button("Confirm Sub-queries"):
+        obs.set_run_context(st.session_state.get("run_id"), phase=AppPhase.QUERY_TUNING.value)
         st.session_state.query_data["sub_queries"] = updated_queries
         with st.spinner("Searching and processing sources..."):
             # Search
-            docs = search.search(updated_queries)
+            with obs.node_span("search", {"sub_queries": updated_queries, "sub_query_count": len(updated_queries)}):
+                docs = search.search(updated_queries)
+            obs.log_node_output("search", {"documents": len(docs), "document_ids": [d.id for d in docs]})
             # Clean & Chunk
-            chunks = clean_chunk.clean_and_chunk(docs)
+            with obs.node_span("clean_chunk", {"documents": len(docs)}):
+                chunks = clean_chunk.clean_and_chunk(docs)
+            obs.log_node_output("clean_chunk", {"chunks": len(chunks)})
             # Embed
-            chunks = embed.embed_chunks(chunks, embedding_model)
+            with obs.node_span("embed", {"chunks": len(chunks)}):
+                chunks = embed.embed_chunks(chunks, embedding_model)
+            obs.log_node_output("embed", {"embedded_chunks": len(chunks)})
             # Aggregate
-            docs = aggregate.aggregate(chunks, docs)
+            with obs.node_span("aggregate", {"chunks": len(chunks), "documents": len(docs)}):
+                docs = aggregate.aggregate(chunks, docs)
+            obs.log_node_output("aggregate", {"documents": len(docs)})
             # Relevance Eval
-            main_query_embedding = embedding_model.encode(st.session_state.query_data["original"])
-            docs = relevance_scorer.calculate_relevance(docs, main_query_embedding)
+            with obs.node_span("relevance_scorer", {"documents": len(docs)}):
+                main_query_embedding = embedding_model.encode(st.session_state.query_data["original"])
+                docs = relevance_scorer.calculate_relevance(docs, main_query_embedding)
+            obs.log_node_output(
+                "relevance_scorer",
+                {
+                    "documents": len(docs),
+                    "top_relevance_scores": sorted(
+                        [float(d.relevance_score or 0.0) for d in docs],
+                        reverse=True,
+                    )[:5],
+                },
+            )
             
             st.session_state.documents = docs
             st.session_state.chunks = chunks
@@ -195,6 +252,7 @@ elif phase == AppPhase.QUERY_TUNING:
         st.rerun()
 
 elif phase == AppPhase.SOURCE_CURATION:
+    obs.set_run_context(st.session_state.get("run_id"), phase=AppPhase.SOURCE_CURATION.value)
     ui.render_icon_title("analytics", "Source Curation", level=2)
     left_col, right_col = st.columns([0.56, 0.44], gap="medium")
 
@@ -307,7 +365,16 @@ elif phase == AppPhase.SOURCE_CURATION:
     if generate_clicked:
         # Filter docs and chunks
         approved_chunks = [c for c in st.session_state.chunks if c.doc_id in selected_doc_ids]
-        clustered_approved_chunks, _, _ = cluster.cluster_chunks(approved_chunks, requested_k=selected_k)
+        with obs.node_span(
+            "cluster_selected_chunks",
+            {
+                "approved_doc_ids": selected_doc_ids,
+                "approved_chunk_count": len(approved_chunks),
+                "selected_k": selected_k,
+            },
+        ):
+            clustered_approved_chunks, _, cluster_metrics = cluster.cluster_chunks(approved_chunks, requested_k=selected_k)
+        obs.log_node_output("cluster_selected_chunks", {"cluster_metrics": cluster_metrics})
         st.session_state.approved_doc_ids = selected_doc_ids
         st.session_state.approved_chunks = clustered_approved_chunks
         st.session_state.chat_history = []
@@ -315,24 +382,67 @@ elif phase == AppPhase.SOURCE_CURATION:
         with st.spinner("Extracting facts and writing report..."):
             # Extract Facts
             selected_docs = [doc for doc in st.session_state.documents if doc.id in selected_doc_ids]
-            facts = extract_facts.extract_facts(clustered_approved_chunks, selected_docs, groq_client, top_k=3)
+            with obs.node_span(
+                "extract_facts",
+                {
+                    "approved_chunks": len(clustered_approved_chunks),
+                    "selected_docs": len(selected_docs),
+                    "top_k": 3,
+                },
+            ):
+                facts = extract_facts.extract_facts(
+                    clustered_approved_chunks,
+                    selected_docs,
+                    groq_client,
+                    top_k=3,
+                )
+            obs.log_node_output("extract_facts", {"facts_count": len(facts), "facts": [f.model_dump() for f in facts]})
             # Gatekeeper
-            grouped_facts = gatekeeper.gatekeeper(facts)
-            # Generate Report
-            report = generate_report.generate_report(
-                grouped_facts,
-                groq_client,
-                original_query=st.session_state.query_data["original"],
-                sub_queries=st.session_state.query_data["sub_queries"],
+            with obs.node_span("gatekeeper", {"facts_count": len(facts)}):
+                grouped_facts = gatekeeper.gatekeeper(facts)
+            obs.log_node_output(
+                "gatekeeper",
+                {
+                    "section_count": len(grouped_facts),
+                    "facts_per_section": {k: len(v) for k, v in grouped_facts.items()},
+                },
             )
+            # Generate Report
+            with obs.node_span(
+                "generate_report",
+                {
+                    "grouped_sections": len(grouped_facts),
+                    "sub_query_count": len(st.session_state.query_data["sub_queries"]),
+                },
+            ):
+                report = generate_report.generate_report(
+                    grouped_facts,
+                    groq_client,
+                    original_query=st.session_state.query_data["original"],
+                    sub_queries=st.session_state.query_data["sub_queries"],
+                )
+            obs.log_node_output("generate_report", {"report_length_chars": len(report or ""), "report": report})
             
             st.session_state.report = report
             st.session_state.facts = facts # Optional
+
+            obs.log_event(
+                "run_finished",
+                {
+                    "status": "report_generated",
+                    "approved_doc_count": len(st.session_state.approved_doc_ids),
+                    "approved_chunk_count": len(st.session_state.approved_chunks),
+                    "facts_count": len(facts),
+                    "grouped_section_count": len(grouped_facts),
+                    "report_length_chars": len(report or ""),
+                },
+            )
             
         sm.set_phase(AppPhase.FINAL_REPORT)
         st.rerun()
 
 elif phase == AppPhase.FINAL_REPORT:
+    obs.set_run_context(st.session_state.get("run_id"), phase=AppPhase.FINAL_REPORT.value)
     if st.session_state.chat_panel_open:
         left_col, right_col = st.columns([0.72, 0.28], gap="medium")
         with left_col:
@@ -361,6 +471,7 @@ elif phase == AppPhase.FINAL_REPORT:
         ui.render_report_with_source_cards(st.session_state.report, approved_docs, container_height=700)
     
     if st.button("Start New Research"):
+        obs.log_event("run_closed", {"reason": "user_started_new_research"})
         _reset_from_phase(AppPhase.INPUT)
         st.session_state.visited_phase_values = {AppPhase.INPUT.value}
         sm.set_phase(AppPhase.INPUT)

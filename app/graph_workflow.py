@@ -35,6 +35,7 @@ from schemas.node_io_schema import (
 )
 from schemas.workflow_schema import WorkflowPhase, WorkflowState
 from utils.guardrails import GuardrailRunner
+from utils import observability as obs
 from nodes import search
 
 
@@ -102,11 +103,17 @@ def build_graph(llm_client, embedding_model):
         return state
 
     def extract_facts_node(state: WorkflowState) -> WorkflowState:
+        obs.set_original_query(state.original_query)
         valid = GuardrailRunner.validate_input(
             {"chunks": state.approved_chunks, "documents": state.documents},
             FactExtractionInput,
         )
-        facts = extract_facts.extract_facts(valid.chunks, valid.documents, llm_client, top_k=3)
+        facts = extract_facts.extract_facts(
+            valid.chunks,
+            valid.documents,
+            llm_client,
+            top_k=3,
+        )
         parsed = GuardrailRunner.validate_output({"facts": facts}, FactExtractionOutput)
         state.facts = parsed.facts
         state.phase = WorkflowPhase.GATEKEEPER
