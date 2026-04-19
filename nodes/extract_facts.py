@@ -8,6 +8,7 @@ from schemas.chunk_schema import Chunk
 from schemas.document_schema import Document
 from schemas.fact_schema import Fact
 from utils.config import FAST_LLM_MODEL
+from utils.observability import get_original_query, logged_chat_completion
 
 
 def _safe_json_loads(payload: str):
@@ -90,7 +91,9 @@ Cluster Excerpts:
 """
 
     try:
-        response = client.chat.completions.create(
+        response = logged_chat_completion(
+            client,
+            node_name="extract_facts.generate_cluster_heading",
             model=FAST_LLM_MODEL,
             messages=[
                 {"role": "system", "content": "You create short research section titles."},
@@ -100,31 +103,49 @@ Cluster Excerpts:
         )
         heading = response.choices[0].message.content.strip()
         heading = " ".join(heading.split())
+        print(f"Generated heading for Cluster {cluster_id}: '{heading}'")
         return heading[:90] if heading else f"Cluster {cluster_id} Findings"
     except Exception:
+        print(f"Error generating heading for Cluster {cluster_id}")
         return f"Cluster {cluster_id} Findings"
 
 
-def _extract_cluster_facts(cluster_heading: str, chunks: List[Chunk], client) -> List[Fact]:
+def _extract_cluster_facts(
+    cluster_heading: str,
+    chunks: List[Chunk],
+    client,
+) -> List[Fact]:
+    original_query = get_original_query()
     context = "\n\n".join([
         f"Source: {c.url}\nContent: {c.text[:900]}"
         for c in chunks
     ])
 
-    prompt = f"""Extract factual bullet points from the sources below.
+    prompt = f"""You are a strict, highly analytical research assistant. Your task is to extract high-density, factual bullet points from the provided sources that directly answer the core research query.
 
-Rules:
-- Keep each item factual and specific.
-- Max 2 sentences per item.
-- Include the exact source URL for each item.
-- Output only JSON in this shape:
+Original Research Query: {original_query or "Not provided"}
+Section Heading: {cluster_heading}
+
+RULES FOR EXTRACTION:
+1. Relevance Gate: The extracted facts MUST explicitly tie back to the Original Research Query. If a source chunk discusses generalities but lacks the core entities of the original query, DO NOT extract facts from it.
+2. High-Density Data Only: Extract concrete findings, metrics, specific outcomes, or defined limitations. 
+3. Ban "Claim" Words: Do NOT extract sentences that just announce a topic (e.g., "A study was conducted", "Experts are concerned", "Research suggests"). State the actual finding directly.
+4. Max 2 sentences per fact.
+5. Include the exact Source URL for every fact.
+
+OUTPUT SCHEMA:
+You must output ONLY valid JSON. Evaluate the text logically before extracting.
 {{
+  "contains_core_entities": true, // Boolean: Does the text explicitly mention the core subjects of the original query?
+  "has_concrete_data": true, // Boolean: Does the text contain actual findings, metrics, or concrete facts?
+  "reasoning": "Briefly explain why the text qualifies or fails.",
   "facts": [
-    {{"fact": "...", "source": "https://..."}}
-  ]
+    {{
+      "fact": "...", 
+      "source": "https://..."
+    }}
+  ] // Leave this array completely EMPTY if either boolean above is false.
 }}
-
-Section heading: {cluster_heading}
 
 Sources:
 {context}
@@ -132,7 +153,9 @@ Sources:
 
     response_content = ""
     try:
-        response = client.chat.completions.create(
+        response = logged_chat_completion(
+            client,
+            node_name="extract_facts.extract_cluster_facts.primary",
             model=FAST_LLM_MODEL,
             messages=[
                 {
@@ -149,7 +172,9 @@ Sources:
     except Exception:
         # Fallback: disable strict JSON mode and parse best-effort JSON block.
         try:
-            response = client.chat.completions.create(
+            response = logged_chat_completion(
+                client,
+                node_name="extract_facts.extract_cluster_facts.fallback",
                 model=FAST_LLM_MODEL,
                 messages=[
                     {
@@ -177,11 +202,16 @@ Sources:
                 facts.append(Fact(sub_query=cluster_heading, fact=fact_text, source=source))
     except Exception as e:
         print(f"Error parsing facts for section '{cluster_heading}': {e}")
-
+    
     return facts
 
 
-def extract_facts(chunks: List[Chunk], documents: List[Document], client, top_k: int = 3) -> List[Fact]:
+def extract_facts(
+    chunks: List[Chunk],
+    documents: List[Document],
+    client,
+    top_k: int = 3,
+) -> List[Fact]:
     all_facts: List[Fact] = []
     grouped_chunks = _chunks_by_cluster(chunks, documents)
 
@@ -203,7 +233,11 @@ def extract_facts(chunks: List[Chunk], documents: List[Document], client, top_k:
         if not selected_chunks:
             continue
         heading = headings.get(cluster_id, f"Cluster {cluster_id} Findings")
-        cluster_facts = _extract_cluster_facts(heading, selected_chunks, client)
+        cluster_facts = _extract_cluster_facts(
+            heading,
+            selected_chunks,
+            client,
+        )
         for fact in cluster_facts:
             fact.cluster_id = cluster_id
         all_facts.extend(cluster_facts)

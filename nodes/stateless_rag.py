@@ -2,6 +2,7 @@ import numpy as np
 from typing import List
 from schemas.chunk_schema import Chunk
 from utils.config import FAST_LLM_MODEL
+from utils.observability import logged_chat_completion
 
 def stateless_rag_answer(query: str, chunks: List[Chunk], client, embedding_model) -> str:
     # 1. Embed query
@@ -33,13 +34,15 @@ Rules:
 - If the answer isn't in the context, say you don't know.
 """
 
-    response = client.chat.completions.create(
+    response = logged_chat_completion(
+        client,
+        node_name="stateless_rag",
         model=FAST_LLM_MODEL,
         messages=[
             {"role": "system", "content": "You are a helpful research assistant. Answer only from the context provided. Always cite sources."},
             {"role": "user", "content": prompt}
         ],
-        temperature=0.2
+        temperature=0.2,
     )
     
     return response.choices[0].message.content
