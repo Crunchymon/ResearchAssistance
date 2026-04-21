@@ -168,12 +168,12 @@ def cluster_chunks(
         color="cluster_id",
         hover_name="title",
         hover_data={"x": False, "y": False},
-        title="Chunk Clusters (PCA)",
+        title="Chunk Clusters (PCA 2D)",
         labels={"x": "PCA Component 1", "y": "PCA Component 2", "cluster_id": "Cluster"},
     )
     pca_fig.update_traces(hovertemplate="<b>%{hovertext}</b><extra></extra>")
-    pca_fig.update_traces(marker={"size": 9, "opacity": 0.78})
-    pca_fig.update_layout(height=460)
+    pca_fig.update_traces(marker={"size": 5, "opacity": 0.5})
+    pca_fig.update_layout(height=500)
 
     return chunks, pca_fig, {
         "selected_k": k,
