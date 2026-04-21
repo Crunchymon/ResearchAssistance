@@ -21,17 +21,33 @@ def stateless_rag_answer(query: str, chunks: List[Chunk], client, embedding_mode
     context = "\n\n".join([f"Source: {c.url}\nContent: {c.text}" for c, _ in top_chunks])
     
     # 3. Generate answer
-    prompt = f"""Answer the user's question using ONLY the provided context chunks.
+    prompt = f"""You are a system that answers questions using retrieved context.
 
 Question: {query}
 
 Context:
 {context}
 
+Instructions:
+
+* Extract the most relevant points from the context.
+* Combine similar points into a single coherent answer.
+* Keep reasoning SIMPLE and grounded — do not overthink or infer beyond the text.
+* For broad questions (e.g., "what is this report about"):
+  → Identify 2–4 main themes that appear repeatedly in the context.
+  → Summarize them clearly.
+
 Rules:
-- Answer strictly using the context.
-- Cite the source URL for each claim you make.
-- If the answer isn't in the context, say you don't know.
+
+* Use ONLY the provided context.
+* If some information is missing, give the best possible partial answer.
+* Only say "I don't know" if nothing in the context is related.
+
+Output Format:
+
+* Key Points:
+* Final Answer:
+* Sources:
 """
 
     response = logged_chat_completion(

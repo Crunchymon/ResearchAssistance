@@ -88,6 +88,11 @@ div.stButton > button[kind="primary"]:hover {
     border-color: #168447;
     color: white;
 }
+
+.report-body {
+    white-space: pre-line;
+    line-height: 1.6;
+}
 </style>
 """,
         unsafe_allow_html=True,
@@ -213,45 +218,122 @@ def render_source_links(documents, container_height: int = 380, user_resource_ur
 def render_report_with_source_cards(report_text: str, documents, container_height: int = 700):
     markdown_link_pattern = r"\[([^\]]+)\]\((https?://[^\s\)<>\"']+)\)"
     bare_url_pattern = r"https?://[^\s\]\)<>\"']+"
+    token_pattern = r"\[S(\d+)\]"
 
-    url_to_token = {}
-    token_to_url = {}
+    existing_token_pattern = r"\[\[S\d+\]\]"
 
-    def _token_for_url(url: str) -> str:
-        if url not in url_to_token:
-            idx = len(url_to_token) + 1
-            token = f"[S{idx}]"
-            url_to_token[url] = token
-            token_to_url[token] = url
-        return url_to_token[url]
+    def _is_fragment_line(line: str) -> bool:
+        token = line.strip()
+        if not token:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z0-9$€£%/.,:;()\[\]\-]+", token)) and len(token) <= 2
+
+    def _repair_fragmented_lines(text: str) -> str:
+        lines = text.splitlines()
+        repaired = []
+        i = 0
+        while i < len(lines):
+            if not _is_fragment_line(lines[i]):
+                repaired.append(lines[i])
+                i += 1
+                continue
+
+            j = i
+            pieces = []
+            while j < len(lines) and _is_fragment_line(lines[j]):
+                pieces.append(lines[j].strip())
+                j += 1
+
+            # Only merge long runs; short runs are often legitimate bullet/text tokens.
+            if len(pieces) >= 6:
+                repaired.append("".join(pieces))
+            else:
+                repaired.extend(pieces)
+            i = j
+
+        return "\n".join(repaired)
+
+    processed = (report_text or "").strip()
+    processed = _repair_fragmented_lines(processed)
+    processed = re.sub(existing_token_pattern, lambda m: m.group(0)[1:-1], processed)
+    processed = re.sub(r"\n{2,}", "\n\n", processed)
+    processed = re.sub(r"[ \t]+", " ", processed)
+
+    existing_numbers = [int(n) for n in re.findall(token_pattern, processed)]
+    next_token_num = (max(existing_numbers) + 1) if existing_numbers else 1
+
+    url_to_token: Dict[str, str] = {}
+    token_to_url: Dict[str, str] = {}
+
+    def _token_for_url(url: str, preferred: Optional[str] = None) -> str:
+        nonlocal next_token_num
+        if url in url_to_token:
+            return url_to_token[url]
+
+        token = None
+        if preferred and re.fullmatch(r"S\d+", preferred.strip()):
+            candidate = preferred.strip()
+            taken_url = token_to_url.get(candidate)
+            if taken_url is None or taken_url == url:
+                token = candidate
+
+        if token is None:
+            while f"S{next_token_num}" in token_to_url:
+                next_token_num += 1
+            token = f"S{next_token_num}"
+            next_token_num += 1
+
+        url_to_token[url] = token
+        token_to_url[token] = url
+        return token
 
     def _replace_markdown(match):
-        label = match.group(1)
+        label = match.group(1).strip()
         url = match.group(2)
-        token = _token_for_url(url)
-        return f"{label} {token}"
+        token = _token_for_url(url, preferred=label)
+        return f"[{token}]"
 
-    cleaned = re.sub(markdown_link_pattern, _replace_markdown, report_text)
-
+    processed = re.sub(markdown_link_pattern, _replace_markdown, processed)
     def _replace_bare(match):
         url = match.group(0)
-        return _token_for_url(url)
+        token = _token_for_url(url)
+        return f"[{token}]"
 
-    cleaned = re.sub(bare_url_pattern, _replace_bare, cleaned)
+    processed = re.sub(bare_url_pattern, _replace_bare, processed)
+
+    lines = processed.split("\n")
+    if lines and re.fullmatch(r"\*\*(.+?)\*\*", lines[0].strip()):
+        heading = re.fullmatch(r"\*\*(.+?)\*\*", lines[0].strip()).group(1)
+        lines[0] = f"## {heading}"
+    markdown_text = "\n".join(lines)
 
     report_container = st.container(height=container_height, border=True)
     with report_container:
-        st.markdown(cleaned)
+        st.markdown(markdown_text)
 
-    if not url_to_token:
+    if not token_to_url:
         return
 
-    token_rows = " ".join([
-        f"<span class='citation-token'>{token}</span>"
-        for token in token_to_url.keys()
-    ])
-    st.markdown(token_rows, unsafe_allow_html=True)
-
+    render_icon_title("link", "Sources", level=3)
     title_by_url = {doc.url: doc.title for doc in documents if getattr(doc, "url", None)}
-    sources = [{"url": url, "title": title_by_url.get(url, url)} for url in url_to_token.keys()]
-    render_source_cards(sources, title_by_url=title_by_url, container_height=230, show_header=False)
+
+    source_container = st.container(height=240, border=True)
+    with source_container:
+        sorted_tokens = sorted(token_to_url.keys(), key=lambda t: int(t[1:]))
+        for token in sorted_tokens:
+            url = token_to_url[token]
+            title = title_by_url.get(url, url)
+            domain = _safe_domain(url)
+
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([0.14, 0.62, 0.24])
+                with c1:
+                    st.markdown(f"<span class='citation-token'>[{token}]</span>", unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"<div class='source-card-title'>{title}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='source-card-domain'>{domain}</div>", unsafe_allow_html=True)
+                with c3:
+                    if url.startswith("http://") or url.startswith("https://"):
+                        st.link_button("Open", url, use_container_width=True, key=f"report_src_{token}")
+                    else:
+                        st.caption("Local source")

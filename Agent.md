@@ -32,30 +32,27 @@ A human-in-the-loop research assistant designed to:
 6. **Embedding Generation**
    * *All text chunks are converted into vector embeddings.*
 
-7. **Aggregation**
-   * *Document-level embeddings are created mathematically via chunk averaging.*
+7. **Clustering**
+   * *System groups chunks into thematic clusters.*
 
-8. **Similarity Matrix & Clustering**
-   * *System groups documents into thematic clusters.*
-
-9. **Evaluation Node**
+8. **Evaluation Node**
    * *System generates a fast overview of source relevance, cluster distribution, and data density.*
 
-10. ⛔ **User Control Layer (Source Curation)**
+9. ⛔ **User Control Layer (Source Curation)**
     * *System halts. The user selects/removes sources or adds custom URLs/PDFs.* *(If new data is added, go to the **Data Cleaning & Text Chunking** node again for the new sources).*
 
-11. **Chunk Retrieval & Fact Extraction** *(Merged Step)*
+10. **Chunk Retrieval & Fact Extraction** *(Merged Step)*
     * *System skips outline generation. It retrieves the Top-K chunks based directly on the approved sub-queries.*
     * *A fast, cheap LLM reads these chunks and extracts precise, highly detailed bullet points with `[Source URL]` tags to answer each sub-query.*
 
-12. **Review Node (The Gatekeeper)**
+11. **Review Node (The Gatekeeper)**
     * *Filters out irrelevant or badly formatted bullet points.*
     * *Zero-Cost Protocol: If a sub-query is left with 0 bullets, it is pruned. If it has 1 bullet, it is merged into an adjacent sub-query's section.*
 
-13. **Final Report Generation**
+12. **Final Report Generation**
     * *The heavy-lifter LLM reads the verified bullet points and writes cohesive paragraphs for each sub-query. No raw chunks are passed here.*
 
-14. **Chat Interface (Stateless Document RAG)**
+13. **Chat Interface (Stateless Document RAG)**
     * *The chat interface has no conversational memory. Every user question is treated as a brand new, isolated search.*
     * *The system embeds the user's question, queries the vector database, and generates an answer grounded strictly in the approved document chunks.*
 
